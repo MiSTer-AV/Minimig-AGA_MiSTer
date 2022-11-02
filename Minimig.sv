@@ -43,7 +43,7 @@ module emu
 	output        HDMI_FREEZE,
 
 `ifdef MISTER_FB
-	// Use framebuffer in DDRAM (USE_FB=1 in qsf)
+	// Use framebuffer in DDRAM
 	// FB_FORMAT:
 	//    [2:0] : 011=8bpp(palette) 100=16bpp 101=24bpp 110=32bpp
 	//    [3]   : 0=16bits 565 1=16bits 1555
@@ -93,13 +93,6 @@ module emu
 	//ADC
 	inout   [3:0] ADC_BUS,
 
-	//SD-SPI
-	output        SD_SCK,
-	output        SD_MOSI,
-	input         SD_MISO,
-	output        SD_CS,
-	input         SD_CD,
-
 	//High latency DDR3 RAM interface
 	//Use for non-critical time purposes
 	output        DDRAM_CLK,
@@ -115,30 +108,13 @@ module emu
 
 	//SDRAM interface with lower latency
 	output        SDRAM_CLK,
-	output        SDRAM_CKE,
 	output [12:0] SDRAM_A,
 	output  [1:0] SDRAM_BA,
 	inout  [15:0] SDRAM_DQ,
-	output        SDRAM_DQML,
-	output        SDRAM_DQMH,
 	output        SDRAM_nCS,
 	output        SDRAM_nCAS,
 	output        SDRAM_nRAS,
 	output        SDRAM_nWE,
-
-`ifdef MISTER_DUAL_SDRAM
-	//Secondary SDRAM
-	//Set all output SDRAM_* signals to Z ASAP if SDRAM2_EN is 0
-	input         SDRAM2_EN,
-	output        SDRAM2_CLK,
-	output [12:0] SDRAM2_A,
-	output  [1:0] SDRAM2_BA,
-	inout  [15:0] SDRAM2_DQ,
-	output        SDRAM2_nCS,
-	output        SDRAM2_nCAS,
-	output        SDRAM2_nRAS,
-	output        SDRAM2_nWE,
-`endif
 
 	input         UART_CTS,
 	output        UART_RTS,
@@ -152,14 +128,90 @@ module emu
 	// 1 - D-/TX
 	// 2..6 - USR2..USR6
 	// Set USER_OUT to 1 to read from USER_IN.
-	input   [6:0] USER_IN,
-	output  [6:0] USER_OUT,
+	output        USER_OSD,
+	output  [1:0] USER_MODE,
+	input   [7:0] USER_IN,
+	output  [7:0] USER_OUT,
+	input   [7:0] USER_IN2,
+	output  [7:0] USER_OUT2,
 
 	input         OSD_STATUS
 );
 
+wire         CLK_JOY = CLK_50M & mt32_disable;         //Assign clock between 40-50Mhz
+wire   [2:0] JOY_FLAG = mt32_disable ? {db9md_ena,~db9md_ena,1'b0} : 3'b000;   //Assign 3 bits of status (31:29) o (63:61)
+wire         JOY_CLK, JOY_LOAD, JOY_SPLIT, JOY_MDSEL;
+wire   [5:0] JOY_MDIN  = JOY_FLAG[2] ? {USER_IN[6],USER_IN[3],USER_IN[5],USER_IN[7],USER_IN[1],USER_IN[2]} : '1;
+wire         JOY_DATA  = JOY_FLAG[1] ? USER_IN[5] : '1;
+//assign       USER_OUT  = JOY_FLAG[2] ? {3'b111,JOY_SPLIT,3'b111,JOY_MDSEL} : JOY_FLAG[1] ? {6'b111011,JOY_CLK,JOY_LOAD} : '1;
+assign       USER_MODE = JOY_FLAG[2:1] ;
+assign       USER_OSD  = JOY_DB1[10] & JOY_DB1[6];
+`ifdef SECOND_MT32
+assign       USER_OUT2[6:0] = USER_OUT_MT32;
+`endif
+
+reg  db9md_ena=1'b0;
+reg  db9_1p_ena=1'b0,db9_2p_ena=1'b0;
+wire db9_status = db9md_ena ? 1'b1 : USER_IN[7];
+always @(posedge clk_sys) 
+ begin
+	if(~db9md_ena & ~db9_status) db9md_ena <= 1'b1; 
+   if(JOYDB9MD_1[2] || JOYDB15_1[2]) db9_1p_ena <= 1'b1;
+	if(~JOYDB9MD_1[2] && JOYDB9MD_2[2] || JOYDB15_2[2]) db9_2p_ena <= 1'b1; //Se niega el del player 1 por si no hay Splitter que no se duplique
+ end
+
+wire [15:0] JOY_DB1 = db9md_ena ? JOYDB9MD_1 : JOYDB15_1;
+wire [15:0] JOY_DB2 = db9md_ena ? JOYDB9MD_2 : JOYDB15_2;
+
+reg [15:0] JOYDB9MD_1,JOYDB9MD_2;
+joy_db9md joy_db9md
+(
+  .clk       ( CLK_JOY    ), //40-50MHz
+  .joy_split ( JOY_SPLIT  ),
+  .joy_mdsel ( JOY_MDSEL  ),
+  .joy_in    ( JOY_MDIN   ),
+  .joystick1 ( JOYDB9MD_1 ),
+  .joystick2 ( JOYDB9MD_2 )	  
+);
+
+reg [15:0] JOYDB15_1,JOYDB15_2;
+joy_db15 joy_db15
+(
+  .clk       ( CLK_JOY   ), //48MHz
+  .JOY_CLK   ( JOY_CLK   ),
+  .JOY_DATA  ( JOY_DATA  ),
+  .JOY_LOAD  ( JOY_LOAD  ),
+  .joystick1 ( JOYDB15_1 ),
+  .joystick2 ( JOYDB15_2 )	  
+);
+
+always_comb begin
+	USER_OUT    = 8'hFF; 
+`ifndef SECOND_MT32
+	if( ~mt32_disable )begin
+		USER_OUT[6:0] = USER_OUT_MT32;
+	end else if (JOY_FLAG[1]) begin
+`else
+	if (JOY_FLAG[1]) begin
+`endif
+		USER_OUT[0] = JOY_LOAD;
+		USER_OUT[1] = JOY_CLK;
+		USER_OUT[6] = 1'b1;
+		USER_OUT[4] = 1'b1;
+	end else if (JOY_FLAG[2]) begin
+		USER_OUT[0] = JOY_MDSEL;
+		USER_OUT[1] = 1'b1;
+		USER_OUT[6] = 1'b1;
+		USER_OUT[4] = JOY_SPLIT;
+	end
+end
+
+wire [15:0] JOY0 = db9_1p_ena ? JOY_DB1 : JOY0_USB;
+wire [15:0] JOY1 = db9_2p_ena ? JOY_DB2 : db9_1p_ena ? JOY0_USB : JOY1_USB;
+wire [15:0] JOY2 = db9_2p_ena ? JOY0_USB : db9_1p_ena ? JOY1_USB : JOY2_USB;
+wire [15:0] JOY3 = db9_2p_ena ? JOY1_USB : db9_1p_ena ? JOY2_USB : JOY3_USB;
+
 assign ADC_BUS  = 'Z;
-assign {SD_SCK, SD_MOSI, SD_CS} = 'Z;
 assign BUTTONS = 0;
 assign HDMI_FREEZE = 0;
 
@@ -169,7 +221,7 @@ localparam CONF_STR = {
 	"J,Red(Fire),Blue,Yellow,Green,RT,LT,Pause;",
 	"jn,A,B,X,Y,R,L,Start;",
 	"jp,B,A,X,Y,R,L,Start;",
-	"-;",
+	"- ;",
 	"I,",
 	"MT32-pi: SoundFont #0,",
 	"MT32-pi: SoundFont #1,",
@@ -186,12 +238,10 @@ localparam CONF_STR = {
 	"V,v",`BUILD_DATE
 };
 
-wire [15:0] JOY0;
-wire [15:0] JOY1;
-wire [15:0] JOY2;
-wire [15:0] JOY3;
-wire [15:0] JOYA0;
-wire [15:0] JOYA1;
+wire [15:0] JOY0_USB;
+wire [15:0] JOY1_USB;
+wire [15:0] JOY2_USB;
+wire [15:0] JOY3_USB;
 wire  [7:0] kbd_mouse_data;
 wire        kbd_mouse_level;
 wire  [1:0] kbd_mouse_type;
@@ -220,17 +270,16 @@ hps_io #(.CONF_STR(CONF_STR), .CONF_STR_BRAM(0)) hps_io
 	.HPS_BUS({HPS_BUS[48:42],ce_pix,HPS_BUS[40:0]}),
 
 	.status(status),
-	.status_menumask({mt32_cfg,mt32_available}),
+	.status_menumask({mt32_cfg,1'b1}), //mt32_available (se deja a 1 para que salgan siempre las opciones mt32 y se pueda activar el disable)
 	.info_req(mt32_info_req),
 	.info(mt32_info_disp),
 
-	.joystick_0(JOY0),
-	.joystick_1(JOY1),
-	.joystick_2(JOY2),
-	.joystick_3(JOY3),
-	.joystick_l_analog_0(JOYA0),
-	.joystick_l_analog_1(JOYA1),
-	
+	.joy_raw(JOY_DB1[5:0] | JOY_DB2[5:0]),
+	.joystick_0(JOY0_USB),
+	.joystick_1(JOY1_USB),
+	.joystick_2(JOY2_USB),
+	.joystick_3(JOY3_USB),
+
 	.ioctl_wait(io_wait),
 
 	.buttons(buttons),
@@ -431,13 +480,11 @@ sdram_ctrl ram1
 
 	.sd_data      (SDRAM_DQ        ),
 	.sd_addr      (SDRAM_A         ),
-	.sd_dqm       ({SDRAM_DQMH, SDRAM_DQML}),
 	.sd_cs        (SDRAM_nCS       ),
 	.sd_ba        (SDRAM_BA        ),
 	.sd_we        (SDRAM_nWE       ),
 	.sd_ras       (SDRAM_nRAS      ),
 	.sd_cas       (SDRAM_nCAS      ),
-	.sd_cke       (SDRAM_CKE       ),
 	.sd_clk       (SDRAM_CLK       ),
 
 	.cpuWR        (ram_din         ),
@@ -648,8 +695,6 @@ minimig minimig
 	._joy2        (~JOY1            ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right] (default joystick port)
 	._joy3        (~JOY2            ), // joystick 1 [fire4,fire3,fire2,fire,up,down,left,right]
 	._joy4        (~JOY3            ), // joystick 2 [fire4,fire3,fire2,fire,up,down,left,right]
-	.joya1        (JOYA0            ),
-	.joya2        (JOYA1            ),
 	.mouse_btn    (mouse_buttons    ), // mouse buttons
 	.kbd_mouse_data (kbd_mouse_data ), // mouse direction data, keycodes
 	.kbd_mouse_type (kbd_mouse_type ), // type of data
@@ -679,7 +724,7 @@ minimig minimig
 	.vblank       (vbl              ),
 	.ar           (ar               ),
 	.scanline     (fx               ),
-	//.ce_pix     (ce_pix           ),
+	//.ce_pix       (ce_pix           ),
 	.res          (res              ),
 
 	//audio
@@ -994,9 +1039,17 @@ wire mt32_available;
 wire mt32_use  = mt32_available & ~mt32_disable;
 wire mt32_mute = mt32_available &  mt32_disable;
 
+`ifndef SECOND_MT32
+wire [6:0] USER_IN_MT32 = mt32_disable ? 1 : USER_IN[6:0];
+`else
+wire [6:0] USER_IN_MT32 = mt32_disable ? 1 : USER_IN2[6:0];
+`endif
+wire [6:0] USER_OUT_MT32;
 mt32pi mt32pi
 (
 	.*,
+	.USER_IN(USER_IN_MT32),
+	.USER_OUT(USER_OUT_MT32),
 	.CE_PIXEL(ce_pix_mt32),
 	.reset(mt32_reset),
 	.midi_tx(midi_tx | mt32_mute)
