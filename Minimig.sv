@@ -37,6 +37,7 @@ module emu
 	output        VGA_F1,
 	output [1:0]  VGA_SL,
 	output        VGA_SCALER, // Force VGA scaler
+	output        VGA_DISABLE, // analog out is off
 
 	input  [11:0] HDMI_WIDTH,
 	input  [11:0] HDMI_HEIGHT,
@@ -213,6 +214,7 @@ wire [15:0] JOY3 = db9_2p_ena ? JOY1_USB : db9_1p_ena ? JOY2_USB : JOY3_USB;
 
 assign ADC_BUS  = 'Z;
 assign BUTTONS = 0;
+assign VGA_DISABLE = 0;
 assign HDMI_FREEZE = 0;
 
 `include "build_id.v" 
@@ -221,7 +223,7 @@ localparam CONF_STR = {
 	"J,Red(Fire),Blue,Yellow,Green,RT,LT,Pause;",
 	"jn,A,B,X,Y,R,L,Start;",
 	"jp,B,A,X,Y,R,L,Start;",
-	"-;",
+	"-   ;",
 	"I,",
 	"MT32-pi: SoundFont #0,",
 	"MT32-pi: SoundFont #1,",
@@ -248,7 +250,7 @@ wire  [7:0] kbd_mouse_data;
 wire        kbd_mouse_level;
 wire  [1:0] kbd_mouse_type;
 wire  [2:0] mouse_buttons;
-wire [63:0] RTC;
+wire [64:0] RTC;
 
 wire        ce_pix;
 wire  [1:0] buttons;
@@ -394,7 +396,6 @@ always @(posedge clk_114) begin
 
 	ram_cs <= ~(ram_ready & cyc & cpu_type) & ram_sel;
 end
-
 
 wire  [1:0] cpu_state;
 wire        cpu_nrst_out;
@@ -1174,12 +1175,29 @@ always @(posedge CLK_AUDIO) begin
 	if(old_r0 == old_r1) aud_r <= old_r1;
 end
 
+wire  [15:0] cdda_l;
+wire  [15:0] cdda_r;
+wire  [15:0] cdda_dout;
+wire         cdda_req;
+wire         cdda_wr;
+
+cdda #(28375160) cdda
+(
+	.CLK(clk_sys),
+	.nRESET(~reset),
+	.WRITE_REQ(cdda_req),
+	.WRITE(cdda_wr),
+	.DIN(cdda_dout),
+	.AUDIO_L(cdda_l),
+	.AUDIO_R(cdda_r)
+);
+
 reg [15:0] out_l, out_r;
 always @(posedge CLK_AUDIO) begin
 	reg [16:0] tmp_l, tmp_r;
 
-	tmp_l <= {aud_l[15],aud_l} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l});
-	tmp_r <= {aud_r[15],aud_r} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r});
+	tmp_l <= {aud_l[15],aud_l} + (mt32_mute ? 17'd0 : {mt32_i2s_l[15],mt32_i2s_l}) + {cdda_l[15], cdda_l};
+	tmp_r <= {aud_r[15],aud_r} + (mt32_mute ? 17'd0 : {mt32_i2s_r[15],mt32_i2s_r}) + {cdda_r[15], cdda_r};
 
 	// clamp the output
 	out_l <= (^tmp_l[16:15]) ? {tmp_l[16], {15{tmp_l[15]}}} : tmp_l[15:0];
